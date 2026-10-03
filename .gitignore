@@ -1,0 +1,13 @@
+.venv/
+.vscode/
+__pycache__/
+*.pyc
+.DS_Store
+
+champions_league.db
+
+Movie_Ticket_project/
+practice.py
+data/Full_Dataset.csv
+data/week05.py
+data/week_05.py
