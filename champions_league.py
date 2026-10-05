@@ -2,12 +2,24 @@ import pandas as pd
 import numpy as np
 import sqlite3
 from main import clean_matches
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
+
+
+# Goals:
+
+# Load and clean Champions League match data
+
+# Store cleaned matches in SQLite
+
+# Generate historical features using only matches before the current match
 
 # SQL and Data Base
 
 # If the file does not exist, creates a new one
 connection = sqlite3.connect("champions_league.db")
-# the cursor- oens a pipeline to the data base file you create and then you can manipulate it.
+# the cursor- pipeline to the data base file you create and then you can manipulate it.
 cursor = connection.cursor()
 
 cursor.execute("""
@@ -29,11 +41,9 @@ INSERT INTO matches(
     away_goals
     ) VALUES(?, ?, ?, ?, ?, ?)""", rows)
 
-match_date = '2018-10-03'
-
 features = []
 
-for match in clean_matches.itertuples(index=False):
+for match in clean_matches.itertuples(index=False):  # Iterates over tuple
     match_date = match.date
     home_team = match.home_team
     away_team = match.away_team
@@ -88,31 +98,33 @@ for match in clean_matches.itertuples(index=False):
             WHEN home_goals > away_goals THEN 1
             ELSE 0
         END
-    ) AS away_loss,
+    ) AS away_loss, 
     SUM(
         CASE
             WHEN home_goals < away_goals THEN 1
             ELSE 0
         END
-        )*100.0/COUNT(*) AS away_win_rate
+        )*100.0/COUNT(*) AS away_win_rate 
     FROM matches
     WHERE date < ?
-    AND away_team = ?
+    AND away_team = ? 
     GROUP BY away_team
     ORDER BY away_win_rate desc""", (match_date, away_team))
 
     away_stats = cursor.fetchone()
 
-    if match.home_goals > match.away_goals:
+    if match.home_goals > match.away_goals:  # Creating variable for match outcome
         result = "H"
     elif match.home_goals == match.away_goals:
         result = "D"
     else:
         result = "A"
 
+    # Skips matches where either team has no prior home/away history
     if home_stats == None or away_stats == None:
         continue
 
+    # Making the features to input into the machine learning pipeline
     home_matches = home_stats[1]
     home_avg_goals = home_stats[2]
     home_conceded_goals = home_stats[3]
@@ -124,6 +136,7 @@ for match in clean_matches.itertuples(index=False):
     away_win_rate = away_stats[7]
 
     features.append({
+        "date": match_date,
         "home_matches": home_matches,
         "home_avg_goals": home_avg_goals,
         "home_avg_conceded": home_conceded_goals,
@@ -135,16 +148,52 @@ for match in clean_matches.itertuples(index=False):
         "away_win_rate": away_win_rate,
 
         "result": result,
-    })
+    })  # Adding each feature needed for the machine learning model to the features array
 
+# Converting engineered features into a DataFrame for model training
 training_data = pd.DataFrame(features)
 
-print(training_data.head())
-print(training_data.shape)
+y = training_data["result"]  # Create y
+x = training_data.drop(columns=["date", "result"])  # Prevents target leakage -
 
 
-# COUNT(*) returns the amoutn of rows
-# GROUP BY put rows with the same category together so I can calculate something for each category
-# Put ; at the last one
-# HAVING: Acts as an if statement
-# AS: creates names for the function
+split_index = int(len(training_data)*0.8)  # Creating the index for the split
+
+# Seperating the test data into 80% training 20% testing
+x_train = x.iloc[:split_index]
+x_test = x.iloc[split_index:]
+
+y_train = y.iloc[:split_index]
+y_test = y.iloc[split_index:]
+
+print(x_train.shape)
+print(x_test.shape)
+print(y_train.shape)
+print(y_test.shape)
+
+scaler = StandardScaler()
+# Learn the mean and standard deviation value and use learned values to scale x_train
+x_train_scaled = scaler.fit_transform(x_train)
+# Use the learned features in the future
+x_test_scaled = scaler.transform(x_test)
+
+model = LogisticRegression()
+# Makes the max iteration be 100, if it goes over, the model will not be as optimized
+
+# Tells the model to take notice of models that are not as frequent
+model = LogisticRegression(class_weight="balanced")
+
+LogisticRegression(max_iter=100)
+model.fit(x_train_scaled, y_train)  # Method to train the model
+
+predictions = model.predict(x_test_scaled)
+
+accuracy = accuracy_score(y_test, predictions)
+
+matrix = confusion_matrix(
+    y_test,
+    predictions,
+    labels=["H", "D", "A"]
+)
+print(matrix)
+print(classification_report(y_test, predictions))
