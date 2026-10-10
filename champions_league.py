@@ -26,8 +26,6 @@ cursor.execute("""
 DELETE FROM matches;
 """)
 
-connection.commit()
-
 # Itertuples turns each row into something sql can easily consume
 rows = clean_matches.itertuples(index=False, name=None)
 
@@ -41,13 +39,13 @@ INSERT INTO matches(
     away_goals
     ) VALUES(?, ?, ?, ?, ?, ?)""", rows)
 
+connection.commit()
+
 features = []
 
-for match in clean_matches.itertuples(index=False):  # Iterates over tuple
-    match_date = match.date
-    home_team = match.home_team
-    away_team = match.away_team
 
+def get_historical_data(cursor, match_date, home_team, away_team):
+    # Historical home performance
     cursor.execute("""SELECT home_team, COUNT(*) AS matches_played, AVG(home_goals) AS avg_home_goals, AVG(away_goals) AS avg_home_goals_conceded, SUM(
         CASE
             WHEN home_goals > away_goals THEN 1
@@ -80,6 +78,7 @@ for match in clean_matches.itertuples(index=False):  # Iterates over tuple
 
     home_stats = cursor.fetchone()
 
+    # Historical away performance
     cursor.execute("""
     SELECT away_team, COUNT(*) AS matches_played, AVG(away_goals) AS avg_away_goals, AVG(home_goals) AS avg_away_goals_conceded, SUM(
         CASE
@@ -113,87 +112,184 @@ for match in clean_matches.itertuples(index=False):  # Iterates over tuple
 
     away_stats = cursor.fetchone()
 
-    if match.home_goals > match.away_goals:  # Creating variable for match outcome
-        result = "H"
-    elif match.home_goals == match.away_goals:
-        result = "D"
+    return home_stats, away_stats
+
+
+def get_recent_matches(cursor, team, match_date):  # Retrieve a teams last 5 matches
+    # Recent match home history
+    cursor.execute("""
+    SELECT home_team, away_team, home_goals, away_goals
+    FROM matches
+    WHERE date < ?
+    AND (home_team = ? OR away_team = ?)
+    ORDER BY date DESC
+    LIMIT 5
+    """, (match_date, team, team))
+
+    return cursor.fetchall()
+
+
+def calculate_recent_form(recent_matches, team):
+    total_goals_scored = 0
+    total_goals_conceded = 0
+    recent_wins = 0
+
+    for recent_match in recent_matches:
+        if recent_match[0] == team:
+            goals_scored = recent_match[2]
+            goals_conceded = recent_match[3]
+        elif recent_match[1] == team:
+            goals_scored = recent_match[3]
+            goals_conceded = recent_match[2]
+        total_goals_conceded += goals_conceded
+        total_goals_scored += goals_scored
+
+        if goals_scored > goals_conceded:
+            recent_wins += 1
+
+    if len(recent_matches) > 0:
+        recent_avg_goals = (total_goals_scored)/(len(recent_matches))
+        recent_avg_conceded = (total_goals_conceded)/(len(recent_matches))
+        recent_win_rate = (recent_wins / len(recent_matches))*100
     else:
-        result = "A"
+        recent_avg_goals = 0
+        recent_avg_conceded = 0
+        recent_win_rate = 0
 
-    # Skips matches where either team has no prior home/away history
-    if home_stats == None or away_stats == None:
-        continue
-
-    # Making the features to input into the machine learning pipeline
-    home_matches = home_stats[1]
-    home_avg_goals = home_stats[2]
-    home_conceded_goals = home_stats[3]
-    home_win_rate = home_stats[7]
-
-    away_matches = away_stats[1]
-    away_avg_goals = away_stats[2]
-    away_conceded_goals = away_stats[3]
-    away_win_rate = away_stats[7]
-
-    features.append({
-        "date": match_date,
-        "home_matches": home_matches,
-        "home_avg_goals": home_avg_goals,
-        "home_avg_conceded": home_conceded_goals,
-        "home_win_rate":    home_win_rate,
-
-        "away_matches": away_matches,
-        "away_avg_goals": away_avg_goals,
-        "away_avg_conceded": away_conceded_goals,
-        "away_win_rate": away_win_rate,
-
-        "result": result,
-    })  # Adding each feature needed for the machine learning model to the features array
-
-# Converting engineered features into a DataFrame for model training
-training_data = pd.DataFrame(features)
-
-y = training_data["result"]  # Create y
-x = training_data.drop(columns=["date", "result"])  # Prevents target leakage -
+    return recent_avg_conceded, recent_avg_goals, recent_win_rate
 
 
-split_index = int(len(training_data)*0.8)  # Creating the index for the split
+def main():
+    for match in clean_matches.itertuples(index=False):
+        match_date = match.date
+        home_team = match.home_team
+        away_team = match.away_team
 
-# Seperating the test data into 80% training 20% testing
-x_train = x.iloc[:split_index]
-x_test = x.iloc[split_index:]
+        home_stats, away_stats = get_historical_data(
+            cursor, match_date, home_team, away_team
+        )
 
-y_train = y.iloc[:split_index]
-y_test = y.iloc[split_index:]
+        # Skips matches where either team has no prior home/away history
+        if home_stats == None or away_stats == None:
+            continue
 
-print(x_train.shape)
-print(x_test.shape)
-print(y_train.shape)
-print(y_test.shape)
+        home_recent_matches = get_recent_matches(cursor, home_team, match_date)
+        away_recent_matches = get_recent_matches(cursor, away_team, match_date)
 
-scaler = StandardScaler()
-# Learn the mean and standard deviation value and use learned values to scale x_train
-x_train_scaled = scaler.fit_transform(x_train)
-# Use the learned features in the future
-x_test_scaled = scaler.transform(x_test)
+        # Tuple unpacking
+        home_recent_avg_conceded, home_recent_avg_goals, home_recent_win_rate = calculate_recent_form(
+            home_recent_matches,  home_team)
+        away_recent_avg_conceded, away_recent_avg_goals, away_recent_win_rate = calculate_recent_form(
+            away_recent_matches, away_team)
 
-model = LogisticRegression()
-# Makes the max iteration be 100, if it goes over, the model will not be as optimized
+        if match.home_goals > match.away_goals:  # Creating variable for match outcome
+            result = "H"
+        elif match.home_goals == match.away_goals:
+            result = "D"
+        else:
+            result = "A"
 
-# Tells the model to take notice of models that are not as frequent
-model = LogisticRegression(class_weight="balanced")
+        # Making the features to input into the machine learning pipeline
+        home_matches = home_stats[1]
+        home_avg_goals = home_stats[2]
+        home_conceded_goals = home_stats[3]
+        home_win_rate = home_stats[7]
 
-LogisticRegression(max_iter=100)
-model.fit(x_train_scaled, y_train)  # Method to train the model
+        away_matches = away_stats[1]
+        away_avg_goals = away_stats[2]
+        away_conceded_goals = away_stats[3]
+        away_win_rate = away_stats[7]
 
-predictions = model.predict(x_test_scaled)
+        features.append({
+            "date": match_date,
 
-accuracy = accuracy_score(y_test, predictions)
+            # Historical home performance
+            "home_matches": home_matches,
+            "home_avg_goals": home_avg_goals,
+            "home_avg_conceded": home_conceded_goals,
+            "home_win_rate": home_win_rate,
 
-matrix = confusion_matrix(
-    y_test,
-    predictions,
-    labels=["H", "D", "A"]
-)
-print(matrix)
-print(classification_report(y_test, predictions))
+            # Historical away performance
+            "away_matches": away_matches,
+            "away_avg_goals": away_avg_goals,
+            "away_avg_conceded": away_conceded_goals,
+            "away_win_rate": away_win_rate,
+
+            # Recent home-team form
+            "home_recent_avg_goals": home_recent_avg_goals,
+            "home_recent_avg_conceded": home_recent_avg_conceded,
+            "home_recent_win_rate": home_recent_win_rate,
+
+            # Recent away-team form
+            "away_recent_avg_goals": away_recent_avg_goals,
+            "away_recent_avg_conceded": away_recent_avg_conceded,
+            "away_recent_win_rate": away_recent_win_rate,
+
+            "win_rate_difference": home_win_rate - away_win_rate,
+            "attack_difference": home_avg_goals - away_avg_goals,
+            "recent_form_difference": home_recent_win_rate - away_recent_win_rate,
+
+            # Target
+            "result": result,
+        })      # Adding each feature needed for the machine learning model to the features array
+
+        # Converting engineered features into a DataFrame for model training
+        # Turning the features array into a dataframe for easier accessiblity
+    training_data = pd.DataFrame(features)
+    training_data = training_data.sort_values(
+        "date").reset_index(drop=True)  # Sort the data by date
+
+    train_model(training_data)
+
+
+def train_model(training_data):
+    y = training_data["result"]
+    x = training_data.drop(columns=["date", "result"])
+
+    # Creating the index for the split
+    split_index = int(len(training_data)*0.8)
+
+    # Seperating the test data into 80% training 20% testing
+    x_train = x.iloc[:split_index]
+    x_test = x.iloc[split_index:]
+
+    y_train = y.iloc[:split_index]
+    y_test = y.iloc[split_index:]
+
+    scaler = StandardScaler()
+
+    # Learn the mean and standard deviation value and use learned values to scale x_train
+    x_train_scaled = scaler.fit_transform(x_train)
+    # Use the learned features in the future
+    x_test_scaled = scaler.transform(x_test)
+
+    # Tells the model to take notice of models that are not as frequent
+    model = LogisticRegression(class_weight="balanced", max_iter=100)
+    model.fit(x_train_scaled, y_train)  # Method to train the model
+
+    predictions = model.predict(x_test_scaled)
+
+    accuracy = accuracy_score(y_test, predictions)
+
+    matrix = confusion_matrix(
+        y_test,
+        predictions,
+        labels=["H", "D", "A"]
+    )
+
+    print(f"Accuracy: {accuracy:.2%}")
+
+    print("\nConfusion Matrix (H, D, A):")
+    print(matrix)
+
+    print("\nClassification Report")
+    print(classification_report(y_test, predictions))
+
+    """print("X type:", type(x))
+    print("X shape:", x.shape)
+    print("Y type:", type(y))
+    print("Y shape:", y.shape)"""
+
+
+if __name__ == "__main__":
+    main()
